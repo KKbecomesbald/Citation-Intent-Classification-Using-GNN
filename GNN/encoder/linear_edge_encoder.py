@@ -12,6 +12,8 @@ class LinearEdgeEncoder(torch.nn.Module):
                 self.in_dim = 1
             else:
                 self.in_dim = list(eval(cfg.posenc_RWSE.kernel.times_func))[-1] + 1
+        elif cfg.dataset.name in ['ACL-ARC']:
+            self.in_dim = cfg.share.dim_in
         else:
             self.in_dim = list(eval(cfg.posenc_RWSE.kernel.times_func))[-1]
         # else:
