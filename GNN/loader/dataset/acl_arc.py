@@ -6,6 +6,7 @@ from sentence_transformers import SentenceTransformer
 from torch_geometric.data import InMemoryDataset, Data
 import torch_geometric.transforms as T
 
+os.environ["TRANSFORMERS_SAFE_LOAD"] = "1"
 # Define the intent mapping at the top level, as it's a constant
 INTENT_TO_INT_ACL = {
     "Background": 0,
@@ -41,9 +42,9 @@ class ACLCitationDataset(InMemoryDataset):
             version. The data object will be transformed before being saved to disk.
             (default: None)
     """
-    def __init__(self, root, lang_model_name='allenai/scibert_scivocab_uncased', 
+    def __init__(self, root, lang_model_name='/home/CitationIntent/.cache/huggingface/hub/models--allenai--specter2_base/snapshots/3447645e1def9117997203454fa4495937bfbd83', 
                 include_authors=True, include_venues=True,
-                transform=None, pre_transform=None,force_reload=False):
+                transform=None, pre_transform=None):
         
         self.lang_model_name = lang_model_name
         self.include_authors = include_authors
@@ -52,13 +53,17 @@ class ACLCitationDataset(InMemoryDataset):
         # A unique name for the processed file based on options
         self.processed_name = f'data_auth_{include_authors}_venue_{include_venues}.pt'
 
-        super().__init__(root, transform, pre_transform,force_reload=force_reload)
+        super().__init__(root, transform, pre_transform)
         self.data, self.slices = torch.load(self.processed_paths[0],weights_only=False)
 
-    @property
+    @property 
     def raw_dir(self):
-        # The user should place the 'acl-arc' folder in the root directory
         return os.path.join(self.root, 'raw')
+
+    @property
+    def revised_dir(self):
+        # The user should place the 'acl-arc' folder in the root directory
+        return os.path.join(self.root, 'revised')
 
     @property
     def processed_dir(self):
@@ -68,6 +73,11 @@ class ACLCitationDataset(InMemoryDataset):
     @property
     def raw_file_names(self):
         # These are the files the loader expects to find in raw_dir
+        return ['papers_full.jsonl', 'train.jsonl', 'dev.jsonl', 'test.jsonl']
+
+    @property
+    def revised_file_names(self):
+        # These are the files the loader expects to find in revised_dir
         return ['papers_full.jsonl', 'train.jsonl', 'dev.jsonl', 'test.jsonl']
 
     @property
@@ -81,24 +91,25 @@ class ACLCitationDataset(InMemoryDataset):
         # into a 'raw' folder within your specified root directory.
         # e.g., <root>/raw/papers_full.jsonl
         raise IOError(
-            f"Dataset not found. Please place the acl-arc files in {self.raw_dir}"
+            f"Dataset not found. Please place the acl-arc files in {self.revised_dir}"
             )
 
     def process(self):
         # Check if raw files exist
-        if not all(os.path.exists(os.path.join(self.raw_dir, f)) for f in self.raw_file_names):
+        if not all(os.path.exists(os.path.join(self.revised_dir, f)) for f in self.revised_file_names):
             self.download()
             
         # 1. Load paper metadata first
         papers_meta = {}
-        with open(os.path.join(self.raw_dir, 'papers_full.jsonl'), "r", encoding="utf-8") as f:
+        with open(os.path.join(self.revised_dir, 'papers_full.jsonl'), "r", encoding="utf-8") as f:
             for line in f:
                 paper = json.loads(line.strip())
-                if 'paperId' in paper:
-                    papers_meta[paper["old_id"]] = {
+                if 'acl_id' in paper:
+                    papers_meta[paper["acl_id"]] = {
                         'title': paper.get('title', ''),
-                        'authors': paper.get('authors', []),
-                        'venue': paper.get('venue', '')
+                        'abstract': paper.get('abstract', ''),
+                        # 'authors': paper.get('authors', []),
+                        # 'venue': paper.get('venue', '')
                     }
         print(f"Loaded metadata for {len(papers_meta)} papers.")
 
@@ -120,7 +131,7 @@ class ACLCitationDataset(InMemoryDataset):
         # 2. Process train, dev, and test splits to build one large graph
         splits = {'train': [], 'dev': [], 'test': []}
         for split_name in splits.keys():
-            path = os.path.join(self.raw_dir, f'{split_name}.jsonl')
+            path = os.path.join(self.revised_dir, f'{split_name}.jsonl')
             
             print(f"Processing {path}...")
             with open(path, "r", encoding="utf-8") as f:
@@ -128,14 +139,16 @@ class ACLCitationDataset(InMemoryDataset):
                     citation = json.loads(line.strip())
                     
                     # --- Add Paper Nodes ---
-                    citing_id = citation["citing_paper_id"]
-                    cited_id = citation["cited_paper_id"]
+                    citing_id = citation["citing_id"]
+                    cited_id = citation["cited_id"]
 
-                    citing_title = papers_meta.get(citing_id, {}).get('title', citation["citing_paper_title"])
-                    cited_title = papers_meta.get(cited_id, {}).get('title', citation["cited_paper_title"])
-                    
-                    src_node_idx = add_node_if_not_exists(citing_id, citing_title)
-                    dst_node_idx = add_node_if_not_exists(cited_id, cited_title)
+                    citing_title = papers_meta.get(citing_id, {}).get('title', citation["citing_title"])
+                    citing_abstract = papers_meta.get(citing_id, {}).get('abstract', "")
+                    cited_title = papers_meta.get(cited_id, {}).get('title', citation["cited_title"])
+                    cited_abstract = papers_meta.get(cited_id, {}).get('abstract', "")
+
+                    src_node_idx = add_node_if_not_exists(citing_id, citing_title + ' ' + citing_abstract)
+                    dst_node_idx = add_node_if_not_exists(cited_id, cited_title + ' ' + cited_abstract)
 
                     # --- Add the primary citation edge ---
                     current_edge_index = len(edge_list)
@@ -274,7 +287,6 @@ if __name__ == '__main__':
         include_authors=True,
         include_venues=True,
         pre_transform=T.ToSparseTensor(),
-        force_reload=True
     )
     
     # Get the single graph object
