@@ -42,7 +42,7 @@ class ACLCitationDataset(InMemoryDataset):
             version. The data object will be transformed before being saved to disk.
             (default: None)
     """
-    def __init__(self, root, lang_model_name='/home/CitationIntent/.cache/huggingface/hub/models--allenai--specter2_base/snapshots/3447645e1def9117997203454fa4495937bfbd83', 
+    def __init__(self, root, lang_model_name='allenai/scibert_scivocab_uncased', 
                 include_authors=True, include_venues=True,
                 transform=None, pre_transform=None):
         
@@ -248,9 +248,9 @@ class ACLCitationDataset(InMemoryDataset):
             edge_attr=edge_attr.cpu(), # Edge features
             y=y.cpu(), # Edge labels
             edge_type=edge_type.cpu(),
-            # train_mask=train_mask.cpu(),
-            # val_mask=val_mask.cpu(),
-            # test_mask=test_mask.cpu(),
+            train_mask=train_mask.cpu(),
+            val_mask=val_mask.cpu(),
+            test_mask=test_mask.cpu(),
             train_edge_index=train_edge_index.cpu(),
             val_edge_index=val_edge_index.cpu(),
             test_edge_index=test_edge_index.cpu(),

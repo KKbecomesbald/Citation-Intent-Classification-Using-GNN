@@ -18,15 +18,15 @@ class RelationPredictionHead(torch.nn.Module):
         if cfg.model.edge_decoding == 'concat':
             self.layer_post_mp = MLP(
                 new_layer_config(
-                    dim_in * 2,
+                    dim_in * 3,
                     dim_out,
                     cfg.gnn.layers_post_mp,
                     has_act=False,
                     has_bias=True,
                     cfg=cfg,
                 ))
-            self.decode_module = lambda v1, v2: \
-                self.layer_post_mp(torch.cat((v1, v2), dim=-1))
+            self.decode_module = lambda v1, v2,e: \
+                self.layer_post_mp(torch.cat((v1, v2,e), dim=-1))
         else:
             if dim_out > 1:
                 raise ValueError(f"Binary edge decoding "
@@ -42,9 +42,7 @@ class RelationPredictionHead(torch.nn.Module):
                     cfg=cfg,
                 ))
             if cfg.model.edge_decoding == 'dot':
-                self.decode_module = lambda v1, v2: torch.sum(v1 * v2, dim=-1)
-            elif cfg.model.edge_decoding == 'cosine_similarity':
-                self.decode_module = torch.nn.CosineSimilarity(dim=-1)
+                self.decode_module = lambda v1, v2,e: torch.sum(v1 * v2* e, dim=-1)
             else:
                 raise ValueError(f"Unknown edge decoding "
                                  f"'{cfg.model.edge_decoding}'")
@@ -52,13 +50,14 @@ class RelationPredictionHead(torch.nn.Module):
     def _apply_index(self, batch):
         index = f'{batch.split}_edge_index'
         label = f'{batch.split}_edge_label'
-        return batch.x[batch[index]], batch[label]
+        mask = f'{batch.split}_mask'
+        return batch.x[batch[index]], batch[label],batch.edge_attr[batch[mask]]
 
     def forward(self, batch):
         if cfg.model.edge_decoding != 'concat':
             batch = self.layer_post_mp(batch)
-        pred, label = self._apply_index(batch)
+        pred, label,edge_attr = self._apply_index(batch)
         nodes_first = pred[0]
         nodes_second = pred[1]
-        pred = self.decode_module(nodes_first, nodes_second)
+        pred = self.decode_module(nodes_first, nodes_second,edge_attr)
         return pred, label
