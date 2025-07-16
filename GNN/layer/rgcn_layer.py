@@ -1,7 +1,8 @@
+import inspect
 import torch_geometric.graphgym.register as register
 import torch.nn as nn
 from typing import Optional, Tuple, Union
-
+import torch.nn.functional as F
 import torch
 from torch import Tensor
 from torch.nn import Parameter
@@ -123,7 +124,7 @@ class RGCNConv(MessagePassing):
         self.in_channels_l = in_channels[0]
 
         self._use_segment_matmul_heuristic_output: torch.jit.Attribute(
-            None, Optional[float])
+            None, Optional[float]) # type: ignore
 
         if num_bases is not None:
             self.weight = Parameter(
@@ -301,6 +302,182 @@ class RGCNConv(MessagePassing):
                 f'{self.out_channels}, num_relations={self.num_relations})')
 
 
+class RGCNConvWithEdges(MessagePassing):
+    def __init__(
+        self,
+        in_channels: Union[int, Tuple[int, int]],
+        out_channels: int,
+        num_relations: int,
+        num_bases: Optional[int] = None,
+        num_blocks: Optional[int] = None,
+        aggr: str = 'mean',
+        root_weight: bool = True,
+        is_sorted: bool = False,
+        bias: bool = True,
+        **kwargs,
+    ):
+        kwargs.setdefault('aggr', aggr)
+        super().__init__(node_dim=0, **kwargs)
+
+        if num_bases is not None and num_blocks is not None:
+            raise ValueError('Can not apply both basis-decomposition and '
+                             'block-diagonal-decomposition at the same time.')
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.num_relations = num_relations
+        self.num_bases = num_bases
+        self.num_blocks = num_blocks
+        self.is_sorted = is_sorted
+
+        if isinstance(in_channels, int):
+            in_channels = (in_channels, in_channels)
+        self.in_channels_l = in_channels[0]
+
+        self._use_segment_matmul_heuristic_output: torch.jit.Attribute(
+            None, Optional[float]) # type: ignore
+
+        if num_bases is not None:
+            self.weight = Parameter(
+                torch.empty(num_bases, in_channels[0], out_channels))
+            self.comp = Parameter(torch.empty(num_relations, num_bases))
+
+        elif num_blocks is not None:
+            assert (in_channels[0] % num_blocks == 0
+                    and out_channels % num_blocks == 0)
+            self.weight = Parameter(
+                torch.empty(num_relations, num_blocks,
+                            in_channels[0] // num_blocks,
+                            out_channels // num_blocks))
+            self.register_parameter('comp', None)
+
+        else:
+            self.weight = Parameter(
+                torch.empty(num_relations, in_channels[0], out_channels))
+            self.register_parameter('comp', None)
+
+        if root_weight:
+            self.root = Parameter(torch.empty(in_channels[1], out_channels))
+        else:
+            self.register_parameter('root', None)
+
+        if bias:
+            self.bias = Parameter(torch.empty(out_channels))
+        else:
+            self.register_parameter('bias', None)
+        self.lin_edge = nn.ModuleList([nn.Linear(in_channels[0], out_channels) for _ in range(num_relations)])
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        super().reset_parameters()
+        glorot(self.weight)
+        glorot(self.comp)
+        glorot(self.root)
+        zeros(self.bias)
+        for lin in self.lin_edge:
+            glorot(lin.weight)
+            zeros(lin.bias)
+
+
+    
+    def forward(self, x: Union[OptTensor, Tuple[OptTensor, Tensor]],
+                edge_index: Adj, edge_type: OptTensor = None, edge_attr: OptTensor = None):
+        r"""Runs the forward pass of the module.
+
+        Args:
+            x (torch.Tensor or tuple, optional): The input node features.
+                Can be either a :obj:`[num_nodes, in_channels]` node feature
+                matrix, or an optional one-dimensional node index tensor (in
+                which case input features are treated as trainable node
+                embeddings).
+                Furthermore, :obj:`x` can be of type :obj:`tuple` denoting
+                source and destination node features.
+            edge_index (torch.Tensor or SparseTensor): The edge indices.
+            edge_type (torch.Tensor, optional): The one-dimensional relation
+                type/index for each edge in :obj:`edge_index`.
+                Should be only :obj:`None` in case :obj:`edge_index` is of type
+                :class:`torch_sparse.SparseTensor`. (default: :obj:`None`)
+        """
+        # Convert input features to a pair of node features or node indices.
+        x_l: OptTensor = None
+        if isinstance(x, tuple):
+            x_l = x[0]
+        else:
+            x_l = x
+        if x_l is None:
+            x_l = torch.arange(self.in_channels_l, device=self.weight.device)
+
+        x_r: Tensor = x_l
+        if isinstance(x, tuple):
+            x_r = x[1]
+
+        size = (x_l.size(0), x_r.size(0))
+        if isinstance(edge_index, SparseTensor):
+            edge_type = edge_index.storage.value()
+        assert edge_type is not None
+
+        # propagate_type: (x: Tensor, edge_type_ptr: OptTensor)
+        out = torch.zeros(x_r.size(0), self.out_channels, device=x_r.device)
+
+        weight = self.weight
+        if self.num_bases is not None:  # Basis-decomposition =================
+            raise NotImplementedError("Basis-decomposition not implemented")
+            # weight = (self.comp @ weight.view(self.num_bases, -1)).view(
+            #     self.num_relations, self.in_channels_l, self.out_channels)
+
+        if self.num_blocks is not None:  # Block-diagonal-decomposition =====
+            raise NotImplementedError("Block-diagonal decomposition not implemented")
+            # if not torch.is_floating_point(
+            #         x_r) and self.num_blocks is not None:
+            #     raise ValueError('Block-diagonal decomposition not supported '
+            #                      'for non-continuous input features.')
+
+            # for i in range(self.num_relations):
+            #     tmp = masked_edge_index(edge_index, edge_type == i)
+            #     h = self.propagate(tmp, x=x_l, edge_type_ptr=None, size=size)
+            #     h = h.view(-1, weight.size(1), weight.size(2))
+            #     h = torch.einsum('abc,bcd->abd', h, weight[i])
+            #     out = out + h.contiguous().view(-1, self.out_channels)
+
+        else:  # No regularization/Basis-decomposition ========================
+            for i in range(self.num_relations):
+                tmp_edge_attr = self.lin_edge[i](edge_attr[edge_type == i])
+                tmp = masked_edge_index(edge_index, edge_type == i)
+                if not torch.is_floating_point(x_r):
+                    out = out + self.propagate(
+                        tmp,
+                        x=weight[i, x_l],
+                        edge_type_ptr=None,
+                        size=size,
+                        edge_attr=tmp_edge_attr,
+                    )
+                else:
+                    h = self.propagate(edge_index=tmp,x=x_l,edge_type_ptr=None,edge_attr=tmp_edge_attr,size=size)
+                    out = out + (h @ weight[i])
+
+        root = self.root
+        if root is not None:
+            if not torch.is_floating_point(x_r):
+                out = out + root[x_r]
+            else:
+                out = out + x_r @ root
+
+        if self.bias is not None:
+            out = out + self.bias
+
+        return out
+    
+    def message(self, x_j: Tensor, edge_attr: Tensor) -> Tensor:
+        return x_j + edge_attr
+
+    # def aggregate(self, edge_attr: Tensor, edge_index: Adj, size: Tuple[int, int]) -> Tensor:
+    #     return scatter(edge_attr, edge_index[0], dim=0, dim_size=size[0], reduce=self.aggr)
+
+    # def message_and_aggregate(self, adj_t: Adj, x: Tensor) -> Tensor:
+    #     if isinstance(adj_t, SparseTensor):
+    #         adj_t = adj_t.set_value(None)
+    #     return spmm(adj_t, x, reduce=self.aggr)
+
 @register.register_layer('rgcn')
 class RGCNLayer(nn.Module):
     def __init__(self, dim_in, dim_out):
@@ -309,4 +486,32 @@ class RGCNLayer(nn.Module):
 
     def forward(self, batch):
         batch.x = self.conv(batch.x, batch.edge_index, batch.edge_type)
+        return batch
+
+
+@register.register_layer('rgcn_with_edges')
+class RGCNLayerWithEdges(nn.Module):
+    def __init__(self, dim_in, dim_out):
+        super().__init__()
+        self.conv = RGCNConvWithEdges(dim_in, dim_out, num_relations=8)
+        self.bn_node = nn.BatchNorm1d(dim_out)
+        self.bn_mp = nn.BatchNorm1d(dim_out)
+        self.mlp = nn.Sequential(
+            nn.BatchNorm1d(dim_out),
+            nn.Linear(dim_out, dim_out*2),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(dim_out*2, dim_out),
+            nn.Dropout(0.2),
+        )
+    def forward(self, batch):
+        x_in = batch.x
+        batch.x = self.bn_node(batch.x)
+        batch.x = self.conv(batch.x, batch.edge_index, batch.edge_type, batch.edge_attr)
+        batch.x = self.bn_mp(batch.x)
+        batch.x = F.relu(batch.x)
+        batch.x = F.dropout(batch.x, p=0.4)
+        batch.x = x_in+batch.x
+        x_in = batch.x
+        batch.x = x_in+self.mlp(batch.x)
         return batch

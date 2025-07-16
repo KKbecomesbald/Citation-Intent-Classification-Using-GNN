@@ -55,7 +55,6 @@ class RelationPredictionHead(torch.nn.Module):
         return batch.x[batch[index]], batch[label]
 
     def forward(self, batch):
-        print(batch)
         if cfg.model.edge_decoding != 'concat':
             batch = self.layer_post_mp(batch)
         pred, label = self._apply_index(batch)
